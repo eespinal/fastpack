@@ -1,5 +1,6 @@
 module M = Map.Make(String);
 module FS = FastpackUtil.FS;
+module Process = FastpackUtil.Process;
 
 exception Error(string);
 
@@ -41,11 +42,7 @@ module NodeServer = {
   let pool =
     Lwt_pool.create(
       1,
-      ~dispose=
-        ((p, _, _)) => {
-          p#terminate;
-          p#close |> ignore |> Lwt.return;
-        },
+      ~dispose=process => process |> Process.finalize |> Lwt.return,
       () => {
         module FS = FastpackUtil.FS;
         let executable = Environment.getExecutable();
@@ -97,7 +94,7 @@ module NodeServer = {
             node_project_root^,
           );
 
-        FS.open_process(cmd);
+        Process.start(cmd) |> Lwt.return;
       },
     );
 
@@ -129,37 +126,39 @@ module NodeServer = {
         ("source", CCOpt.map_or(~default=`Null, to_json_string, source)),
       ]);
 
-    Lwt_pool.use(
-      pool,
-      ((_, fp_in_ch, fp_out_ch)) => {
-        let%lwt () =
-          Lwt_io.write(fp_out_ch, Yojson.to_string(message) ++ "\n");
-        let%lwt line = Lwt_io.read_line(fp_in_ch);
-        open Yojson.Safe.Util;
-        let data = Yojson.Safe.from_string(line);
-        let source = member("source", data) |> to_string_option;
-        let dependencies =
-          member("dependencies", data)
-          |> to_list
-          |> List.map(to_string_option)
-          |> List.filter_map(item => item);
+    Lwt_pool.use(pool, process =>
+      Process.withProcessAsync(
+        process,
+        (fp_in_ch, fp_out_ch) => {
+          let%lwt () =
+            Lwt_io.write(fp_out_ch, Yojson.to_string(message) ++ "\n");
+          let%lwt line = Lwt_io.read_line(fp_in_ch);
+          open Yojson.Safe.Util;
+          let data = Yojson.Safe.from_string(line);
+          let source = member("source", data) |> to_string_option;
+          let dependencies =
+            member("dependencies", data)
+            |> to_list
+            |> List.map(to_string_option)
+            |> List.filter_map(item => item);
 
-        let files =
-          member("files", data)
-          |> to_list
-          |> List.map(to_string_option)
-          |> List.filter_map(item => item);
+          let files =
+            member("files", data)
+            |> to_list
+            |> List.map(to_string_option)
+            |> List.filter_map(item => item);
 
-        switch (source) {
-        | None =>
-          let error =
-            member("error", data) |> member("message") |> to_string;
-          Lwt.fail(Error(error));
-        | Some(source) =>
-          /* Logs.debug(x => x("SOURCE: %s", source)); */
-          Lwt.return((source, dependencies, files))
-        };
-      },
+          switch (source) {
+          | None =>
+            let error =
+              member("error", data) |> member("message") |> to_string;
+            Lwt.fail(Error(error));
+          | Some(source) =>
+            /* Logs.debug(x => x("SOURCE: %s", source)); */
+            Lwt.return((source, dependencies, files))
+          };
+        },
+      )
     );
   };
 
